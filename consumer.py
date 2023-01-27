@@ -1,5 +1,7 @@
 import argparse
 import logging
+import threading
+
 import pika
 import pprint
 import time
@@ -80,17 +82,22 @@ class Rabbitmq:
                 self.consume_ch.basic_ack(method_frame.delivery_tag)
             else:
                 # stopping to consume and processing the appended data
+                # reject the message that was consumed and that wasnt greater in size to be appended
+                self.consume_ch.basic_reject(delivery_tag=method_frame.delivery_tag)
                 self.consume_ch.stop_consuming()
-                self.scan_data(self.consolidated)
+                th = threading.Thread(target=self.process_(self.consolidated))
+                th.start()
                 self.consolidated.clear()
                 self.consume_()
+
+    def process_(self,data):
+        self.connection.add_callback_threadsafe(self.scan_data(data))
 
     def scan_data(self, data):
         # processing data for 30 min
         # NOTE: You WILL exceeed the channel timeout here if your task takes longer than 30 minutes
-        logging.info("sleeping for 10 seconds to simulate work...")
-        time.sleep(10)
-        # publishing
+        logging.info("sleeping for 20 minutes to simulate work...")
+        time.sleep(1200)
         self.publish_ch.basic_publish(
             exchange="", routing_key=self.publish_qname, body=str(data)
         )
