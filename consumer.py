@@ -1,4 +1,5 @@
 import argparse
+import ast
 import functools
 import logging
 import threading
@@ -43,7 +44,11 @@ args = parser.parse_args()
 
 class Rabbitmq:
     def __init__(self, host, port, vhost):
+        self.max_byte_size_to_combine = 500
         self.consolidated = []
+        self.connection = None
+        self.consume_ch = None
+        self.publish_ch = None
         self.work_done_event = threading.Event()
 
         credentials = pika.PlainCredentials(username="guest", password="guest")
@@ -52,11 +57,11 @@ class Rabbitmq:
             port=port,
             virtual_host=vhost,
             credentials=credentials,
-            heartbeat=5,
+            heartbeat=10,
         )
         self.connection = pika.BlockingConnection(parameters=parameters)
         self.consume_ch = self.connection.channel()
-        q3_test_q = self.consume_ch.queue_declare("q3_test", durable=True)
+        q3_test_q = self.consume_ch.queue_declare("q3_test", durable=True, arguments={"x-queue-type": "quorum"},)
         logging.info("declared queue: %s", pprint.pformat(q3_test_q))
         self.consume_qname = q3_test_q.method.queue
 
@@ -64,46 +69,76 @@ class Rabbitmq:
         result_queue_q = self.publish_ch.queue_declare(queue="result_queue")
         logging.info("declared queue: %s", pprint.pformat(result_queue_q))
         self.publish_qname = result_queue_q.method.queue
+
+        self.run()
+
+    def run(self):
+        while True:
+            result = self.start()
+            if result:
+                continue
+
+    def start(self):
+        self.work_done_event.clear()
+        self.consume_ch.basic_qos(prefetch_count=1)
         self.start_consuming()
 
-    def on_message_callback(self, ch, method_frame, _header_frame, body):
-        assert self.consume_ch is ch
-        msgsize = getsizeof(body)
-        logging.info("consumed message, size %d", msgsize)
-        self.totalsize = self.totalsize + msgsize
-        delivery_tag = method_frame.delivery_tag
-        # appending if the size of data is less than 4000 bytes
-        if self.totalsize < 4000:
-            self.consolidated.append(body)
-            self.consume_ch.basic_ack(delivery_tag)
-        else:
-            # stopping to consume and processing the appended data
-            # reject the message that was consumed and that wasnt greater in size to be appended
-            logging.info("rejecting message with tag %d", delivery_tag)
-            self.consume_ch.basic_reject(delivery_tag=delivery_tag, requeue=True)
-            th = threading.Thread(target=self.do_work, args=(self.consolidated,))
-            th.start()
-            logging.info("stopping consuming...")
-            self.consume_ch.stop_consuming()
+        while not self.work_done_event.is_set():
+            self.connection.process_data_events(time_limit=15)
+            if self.work_done_event.is_set():
+                # returning true, to start the consuming again
+                return True
+            else:
+                pass
+        return True
 
     def start_consuming(self):
-        logging.info("START consuming")
-        self.work_done_event.clear()
-        self.totalsize = 0
-        self.consolidated.clear()
-        self.consume_ch.basic_qos(prefetch_count=1)
-        self.consume_ch.basic_consume(
-            on_message_callback=self.on_message_callback, queue=self.consume_qname
-        )
-        self.consume_ch.start_consuming()
-        logging.info("consuming STOPPED, waiting for work to finish...")
-        while not self.work_done_event.is_set():
-            self.connection.process_data_events(time_limit=5)
-            if self.work_done_event.is_set():
-                logging.info("work is done, re-starting consuming!")
-                self.start_consuming()
-            else:
-                logging.info("still waiting for work to finish...")
+        consolidated_messages = []
+        consolidated_byte_size = 0
+
+        for method_frame, properties, body in self.consume_ch.consume(queue=self.consume_qname, inactivity_timeout=15):
+            try:
+                body_ = body.decode("UTF-8")
+                asset = ast.literal_eval(body_)
+
+                msg_body_size = getsizeof(asset)
+                consolidated_byte_size = consolidated_byte_size + msg_body_size
+                delivery_tag = method_frame.delivery_tag
+
+                if consolidated_byte_size < self.max_byte_size_to_combine:
+                    consolidated_messages.append(asset)
+                    self.consume_ch.basic_ack(delivery_tag)
+
+                elif consolidated_byte_size > self.max_byte_size_to_combine and not len(consolidated_messages):
+                    consolidated_messages.append(asset)
+                    self.consume_ch.basic_ack(delivery_tag)
+                    # tried using self.consume_ch.cancel, here didn't seem to work
+                    self.trigger_thread(consolidated_messages, self.consume_ch)
+
+                else:
+                    self.consume_ch.basic_reject(delivery_tag=delivery_tag, requeue=True)
+                    # tried using self.consume_ch.cancel to stop the consumer here to, didn't seem to work
+                    self.trigger_thread(consolidated_messages, self.consume_ch)
+
+
+            except AttributeError:
+                # if there are any messages and inactivity times out remaining messages are processed
+                if not body and len(consolidated_messages):
+                    self.trigger_thread(consolidated_messages, self.consume_ch)
+
+            except Exception:
+                if (body is None) and (len(consolidated_messages) == 0):
+                    self.work_done_event.set()
+                    return
+                continue
+
+    def trigger_thread(self, data, channel_):
+        try:
+            channel_.stop_consuming()
+            th = threading.Thread(target=self.do_work, args=(data,))
+            th.start()
+        except Exception as e:
+            raise e
 
     def work_is_done(self, data):
         self.publish_ch.basic_publish(
@@ -117,7 +152,7 @@ class Rabbitmq:
         # logging.info("sleeping for 20 minutes to simulate work...")
         # time.sleep(1200)
         logging.info("sleeping for 30 seconds to simulate work...")
-        time.sleep(30)
+        time.sleep(10)
         cb = functools.partial(self.work_is_done, data)
         self.connection.add_callback_threadsafe(cb)
         logging.info("DONE - simulated work")

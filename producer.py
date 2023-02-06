@@ -65,15 +65,12 @@ consume_ch.basic_qos(prefetch_count=10)
 
 
 def publish_():
-    msgcount = 10
+    msgcount = 9
+    msg = "{9000: {'name': ['Antonio Klein', 'Shannon Buchanan MD', 'Sarah Patterson', 'Nicole Cooper', 'Angela Garrett'], " \
+          "'email': ['waltonmitchell@example.com', 'edalton@example.com', 'shannonevans@example.org', 'jacksonkathryn@example.org', 'wendy22@example.net']}}"
     logging.info("publishing %d messages", msgcount)
-    n = ""
     for _ in range(msgcount):
-        for _ in range(1000):
-            n = n + "a"
-        m.append(n)
-        n = ""
-        pub_ch.basic_publish(exchange="", routing_key=publish_qname, body=str(m))
+        pub_ch.basic_publish(exchange='',routing_key=publish_qname,body=msg)
     logging.info("DONE publishing %d messages", msgcount)
 
 def consume_():
