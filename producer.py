@@ -54,7 +54,11 @@ consume_ch = connection.channel()
 
 m = []
 
-q3_test_q = pub_ch.queue_declare(queue="q3_test", durable=True)
+q3_test_q = pub_ch.queue_declare(
+    "q3_test",
+    durable=True,
+    arguments={"x-queue-type": "quorum"},
+)
 logging.info("declared queue: %s", pprint.pformat(q3_test_q))
 publish_qname = q3_test_q.method.queue
 
@@ -66,12 +70,15 @@ consume_ch.basic_qos(prefetch_count=10)
 
 def publish_():
     msgcount = 9
-    msg = "{9000: {'name': ['Antonio Klein', 'Shannon Buchanan MD', 'Sarah Patterson', 'Nicole Cooper', 'Angela Garrett'], " \
-          "'email': ['waltonmitchell@example.com', 'edalton@example.com', 'shannonevans@example.org', 'jacksonkathryn@example.org', 'wendy22@example.net']}}"
+    msg = (
+        "{9000: {'name': ['Antonio Klein', 'Shannon Buchanan MD', 'Sarah Patterson', 'Nicole Cooper', 'Angela Garrett'], "
+        "'email': ['waltonmitchell@example.com', 'edalton@example.com', 'shannonevans@example.org', 'jacksonkathryn@example.org', 'wendy22@example.net']}}"
+    )
     logging.info("publishing %d messages", msgcount)
     for _ in range(msgcount):
-        pub_ch.basic_publish(exchange='',routing_key=publish_qname,body=msg)
+        pub_ch.basic_publish(exchange="", routing_key=publish_qname, body=msg)
     logging.info("DONE publishing %d messages", msgcount)
+
 
 def consume_():
     for m, p, b in consume_ch.consume("result_queue"):

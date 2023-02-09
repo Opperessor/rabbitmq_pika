@@ -61,7 +61,11 @@ class Rabbitmq:
         )
         self.connection = pika.BlockingConnection(parameters=parameters)
         self.consume_ch = self.connection.channel()
-        q3_test_q = self.consume_ch.queue_declare("q3_test", durable=True, arguments={"x-queue-type": "quorum"},)
+        q3_test_q = self.consume_ch.queue_declare(
+            "q3_test",
+            durable=True,
+            arguments={"x-queue-type": "quorum"},
+        )
         logging.info("declared queue: %s", pprint.pformat(q3_test_q))
         self.consume_qname = q3_test_q.method.queue
 
@@ -74,9 +78,10 @@ class Rabbitmq:
 
     def run(self):
         while True:
-            result = self.start()
-            if result:
+            if self.start():
                 continue
+            else:
+                break
 
     def start(self):
         self.work_done_event.clear()
@@ -96,7 +101,14 @@ class Rabbitmq:
         consolidated_messages = []
         consolidated_byte_size = 0
 
-        for method_frame, properties, body in self.consume_ch.consume(queue=self.consume_qname, inactivity_timeout=15):
+        logging.info("consumer is starting")
+        for method_frame, _, body in self.consume_ch.consume(
+            queue=self.consume_qname, inactivity_timeout=15
+        ):
+            if method_frame is None:
+                # This means no message arrived in 15 seconds
+                logging.info("consumer did not see message within inactivity_timeout")
+                continue
             try:
                 body_ = body.decode("UTF-8")
                 asset = ast.literal_eval(body_)
@@ -108,33 +120,33 @@ class Rabbitmq:
                 if consolidated_byte_size < self.max_byte_size_to_combine:
                     consolidated_messages.append(asset)
                     self.consume_ch.basic_ack(delivery_tag)
-
-                elif consolidated_byte_size > self.max_byte_size_to_combine and not len(consolidated_messages):
+                elif consolidated_byte_size > self.max_byte_size_to_combine and not len(
+                    consolidated_messages
+                ):
                     consolidated_messages.append(asset)
                     self.consume_ch.basic_ack(delivery_tag)
-                    # tried using self.consume_ch.cancel, here didn't seem to work
                     self.trigger_thread(consolidated_messages, self.consume_ch)
-
+                    break
                 else:
-                    self.consume_ch.basic_reject(delivery_tag=delivery_tag, requeue=True)
-                    # tried using self.consume_ch.cancel to stop the consumer here to, didn't seem to work
+                    self.consume_ch.basic_reject(
+                        delivery_tag=delivery_tag, requeue=True
+                    )
                     self.trigger_thread(consolidated_messages, self.consume_ch)
-
-
+                    break
             except AttributeError:
                 # if there are any messages and inactivity times out remaining messages are processed
                 if not body and len(consolidated_messages):
                     self.trigger_thread(consolidated_messages, self.consume_ch)
-
+                    break
             except Exception:
                 if (body is None) and (len(consolidated_messages) == 0):
                     self.work_done_event.set()
                     return
-                continue
+        logging.info("consumer has finished")
+        self.consume_ch.cancel()
 
     def trigger_thread(self, data, channel_):
         try:
-            channel_.stop_consuming()
             th = threading.Thread(target=self.do_work, args=(data,))
             th.start()
         except Exception as e:
@@ -149,9 +161,7 @@ class Rabbitmq:
     def do_work(self, data):
         # processing data for 30 min
         # NOTE: You WILL exceeed the channel timeout here if your task takes longer than 30 minutes
-        # logging.info("sleeping for 20 minutes to simulate work...")
-        # time.sleep(1200)
-        logging.info("sleeping for 30 seconds to simulate work...")
+        logging.info("sleeping for 10 seconds to simulate work...")
         time.sleep(10)
         cb = functools.partial(self.work_is_done, data)
         self.connection.add_callback_threadsafe(cb)
